@@ -38,6 +38,93 @@ server <- function(input, output, session) {
   renderState$healthyDone <- FALSE
   
   stored_plots <- reactiveValues(linePlot = NULL, healthyPlot = NULL)
+
+  stored_plots$modelComparisonPlot <- NULL
+
+  # Handsaker-style CTMC helpers ------------------------------------------------
+  # In the Handsaker model, p_exp splits the total mutation rate into expansion
+  # and contraction rates, then a one-year transition matrix is computed using
+  # expm(Q). This differs from the Latus event-sampling implementation, which
+  # samples an integer number of mutation events per year.
+  if (!requireNamespace("expm", quietly = TRUE)) {
+    install.packages("expm", repos = "https://cran.rstudio.com/")
+  }
+
+  generate_handsaker_Q <- function(pexp, r1_mut, r2_mut, T1 = 33.5, T2 = 72.2, max_cag = 500,
+                                   rate_modifier = 1) {
+    Q <- matrix(0, nrow = max_cag, ncol = max_cag)
+    for (i in 2:(max_cag - 1)) {
+      rate <- rate_modifier * (r1_mut * max(i - T1, 0) + r2_mut * max(i - T2, 0))
+      expansion_rate <- rate * pexp
+      contraction_rate <- rate * (1 - pexp)
+      Q[i, i - 1] <- contraction_rate
+      Q[i, i + 1] <- expansion_rate
+      Q[i, i] <- -(expansion_rate + contraction_rate)
+    }
+    return(Q)
+  }
+
+  simulate_one_ctmc_step <- function(cag, transition_matrix) {
+    cag <- max(2, min(as.integer(round(cag)), nrow(transition_matrix)))
+    pdf <- transition_matrix[cag, ]
+    cdf <- cumsum(pdf)
+    p <- runif(1)
+    idx <- which(cdf >= p)[1]
+    if (is.na(idx)) idx <- length(cdf)
+    return(idx)
+  }
+
+  simulate_handsaker_lifecycle <- function(ncells, years, initial_cag, age_at_intervention,
+                                           transduction_rate, therapeutic_modifier, pexp,
+                                           untreated = FALSE, max_cag = 500) {
+    # Fig. SN4.4 reports effective net expansion rates of 3.51% and 57.6%.
+    # In the CTMC, net expansion = mutation_rate * (2*p_exp - 1), so convert
+    # these net rates back to total mutation-rate constants before building Q.
+    net_factor <- 2 * pexp - 1
+    if (net_factor <= 0) stop("p_exp must be > 0.5 for positive net expansion")
+    r1_mut <- 0.035 / net_factor
+    r2_mut <- 0.576 / net_factor
+
+    Q_base <- generate_handsaker_Q(pexp, r1_mut, r2_mut, T1 = 33.5, T2 = 72.2,
+                                   max_cag = max_cag, rate_modifier = 1)
+    Q_tx <- generate_handsaker_Q(pexp, r1_mut, r2_mut, T1 = 33.5, T2 = 72.2,
+                                 max_cag = max_cag, rate_modifier = (1 - therapeutic_modifier))
+    P_base <- expm::expm(Q_base)
+    P_tx <- expm::expm(Q_tx)
+
+    repeat_lengths <- rep(as.integer(initial_cag), ncells)
+    therapeutic_status <- rep("0", ncells)
+    out <- data.frame()
+
+    for (year in 0:years) {
+      # Match the existing Latus model: therapy is administered before the
+      # intervention-year state is recorded, so transduced cells are visible
+      # at Year == age_at_intervention.
+      if (!untreated && year == age_at_intervention) {
+        therapeutic_status <- ifelse(rbinom(ncells, 1, transduction_rate) == 1, "transduced", "0")
+      }
+
+      out <- rbind(out, data.frame(
+        Year = year,
+        RepeatLength = repeat_lengths,
+        CellID = seq_along(repeat_lengths),
+        Transduction = therapeutic_status,
+        Model = "Handsaker_CTM"
+      ))
+
+      # Apply one-year transition after recording the current state
+      for (j in seq_along(repeat_lengths)) {
+        if (repeat_lengths[j] < max_cag) {
+          if (!untreated && therapeutic_status[j] == "transduced" && year >= age_at_intervention) {
+            repeat_lengths[j] <- simulate_one_ctmc_step(repeat_lengths[j], P_tx)
+          } else {
+            repeat_lengths[j] <- simulate_one_ctmc_step(repeat_lengths[j], P_base)
+          }
+        }
+      }
+    }
+    return(out)
+  }
   
   # Build descriptive filename prefix from current input parameters
   get_file_prefix <- reactive({
@@ -50,7 +137,9 @@ server <- function(input, output, session) {
            "_nMSN", input$nMSNs_CaudatePutamen,
            "_thresh", input$HealthyCellCAG_Threshold,
            "_contr", input$n_contractions,
-           "_exp", input$n_expansions)
+           "_exp", input$n_expansions,
+           "_pexp", input$p_exp,
+           "_model", input$modelMode)
   })
   
   ########################################
@@ -543,6 +632,74 @@ server <- function(input, output, session) {
   })
   
 
+
+  ########################################
+  # Handsaker CTMC comparison simulation
+  ########################################
+  handsaker_simulation_data <- eventReactive(input$run, {
+    validate(
+      need(input$maxLifetime > input$age_at_intervention,
+           "Error: Max Lifetime must be greater than Age at Intervention."),
+      need(input$p_exp > 0.5,
+           "Error: Handsaker p_exp must be > 0.5 for net expansion.")
+    )
+
+    plot_data_h <- simulate_handsaker_lifecycle(
+      ncells = input$nMSNs_CaudatePutamen,
+      years = input$maxLifetime,
+      initial_cag = input$germlineHDRepeatLength,
+      age_at_intervention = input$age_at_intervention,
+      transduction_rate = input$transductionRate,
+      therapeutic_modifier = input$therapeuticModifier,
+      pexp = input$p_exp,
+      untreated = FALSE
+    )
+
+    plot_data_untreated_h <- simulate_handsaker_lifecycle(
+      ncells = input$nMSNs_CaudatePutamen,
+      years = input$maxLifetime,
+      initial_cag = input$germlineHDRepeatLength,
+      age_at_intervention = input$age_at_intervention,
+      transduction_rate = input$transductionRate,
+      therapeutic_modifier = input$therapeuticModifier,
+      pexp = input$p_exp,
+      untreated = TRUE
+    )
+
+    healthy_h <- get_healthy_cells_fun(plot_data_h, input$HealthyCellCAG_Threshold)
+    healthy_h_untreated <- get_healthy_cells_fun(plot_data_untreated_h, input$HealthyCellCAG_Threshold)
+    healthy_h_merged <- merge(healthy_h, healthy_h_untreated, by = "Age")
+    colnames(healthy_h_merged) <- c("Age", "HealthyTreated", "HealthyUntreated")
+
+    dead_h <- get_dead_cells_fun(plot_data_h)
+    dead_h_untreated <- get_dead_cells_fun(plot_data_untreated_h)
+    dead_h_merged <- merge(dead_h, dead_h_untreated, by = "Age")
+    colnames(dead_h_merged) <- c("Age", "DeadTreated", "DeadUntreated")
+
+    line_h <- merge(healthy_h_merged, dead_h_merged, by = "Age")
+    line_h$Model <- "Handsaker CTMC"
+
+    return(list(
+      plot_data = plot_data_h,
+      plot_data_untreated = plot_data_untreated_h,
+      linePlot_data = line_h,
+      healthy_cells = healthy_h_merged,
+      dead_cells = dead_h_merged
+    ))
+  })
+
+
+  ########################################
+  # Active model selector
+  ########################################
+  active_simulation_data <- reactive({
+    if (input$modelMode == "handsaker") {
+      handsaker_simulation_data()
+    } else {
+      simulation_data()
+    }
+  })
+
   #######################################
   # Create and Render Output Plots
   #######################################
@@ -578,27 +735,18 @@ server <- function(input, output, session) {
   
 
   ### Create animated plot of cell loss ###
-  output$animationPlot <- renderImage({
-    plot_data <- simulation_data()[[1]]
-    plot_data_untreated <- simulation_data()[[2]]
-    #barplot_data_pct_dead_cells_merged <- simulation_data()[[8]]
-    #background_data <- simulation_data()[[3]]
-    #background_data_treated <- simulation_data()[[4]]
-    
-    # Isolate inputs to prevent gif from reloading with any change
-    repeat_len <- isolate(input$germlineHDRepeatLength)
-    highlight <- isolate(input$highlightTransducedCells)
-    max_life <- isolate(input$maxLifetime)
-    
+
+  make_repeat_animation <- function(plot_data, title_prefix, repeat_len, highlight, max_life) {
+    threshold <- input$HealthyCellCAG_Threshold
     if (highlight != TRUE) {
-      # Create the plot
       p <- ggplot(plot_data, aes(x = RepeatLength, y = CellID)) +
         geom_point(aes(color = RepeatLength), alpha = 0.7) +
-        geom_vline(xintercept = 150, color = "red", linetype = "dashed") +
+        geom_vline(xintercept = threshold, color = "red", linetype = "dashed") +
         scale_color_gradient2(low = "forestgreen", mid = "red", high = "red", midpoint = 200) +
-        labs(title = "Distribution of Repeat Lengths", 
-             subtitle = "Year: {frame_time}. CAP Score: {round(CAP_Score_Fun(frame_time, repeat_len)[[1]], 2)}",          x = "Repeat Length", 
-          y = "") +
+        labs(title = title_prefix,
+             subtitle = "Year: {frame_time}. CAP Score: {round(CAP_Score_Fun(frame_time, repeat_len)[[1]], 2)}",
+             x = "Repeat Length",
+             y = "") +
         theme_minimal() +
         theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
         coord_cartesian(xlim = c(0, 285)) +
@@ -610,37 +758,49 @@ server <- function(input, output, session) {
         geom_point(data = subset(plot_data, Transduction == "transduced"),
                    aes(x = RepeatLength, y = CellID),
                    color = "violet", shape = 21, size = 3, fill = NA) +
-        geom_vline(xintercept = 150, color = "red", linetype = "dashed") +
+        geom_vline(xintercept = threshold, color = "red", linetype = "dashed") +
         scale_color_gradient2(low = "forestgreen", mid = "red", high = "red", midpoint = 200) +
-        labs(title = "Distribution of Repeat Lengths", 
-             subtitle = "Year: {frame_time}. CAP Score: {round(CAP_Score_Fun(frame_time, repeat_len)[[1]], 2)}",  
-             x = "Repeat Length", 
+        labs(title = title_prefix,
+             subtitle = "Year: {frame_time}. CAP Score: {round(CAP_Score_Fun(frame_time, repeat_len)[[1]], 2)}",
+             x = "Repeat Length",
              y = "") +
         theme_minimal() +
-        theme(axis.text.y = element_blank(),
-              axis.ticks.y = element_blank()) +
+        theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+        coord_cartesian(xlim = c(0, 285)) +
         transition_time(Year) +
-        ease_aes('linear') +
-        coord_cartesian(xlim = c(0, 285))
+        ease_aes('linear')
     }
-    
-    
-    # Save the cell animation as a GIF
+    return(p)
+  }
+
+  output$animationPlot <- renderImage({
+    d <- active_simulation_data()
+    plot_data <- d$plot_data
+    repeat_len <- isolate(input$germlineHDRepeatLength)
+    highlight <- isolate(input$highlightTransducedCells)
+    max_life <- isolate(input$maxLifetime)
+    model_title <- ifelse(input$modelMode == "handsaker",
+                          paste0("Handsaker CTMC model (p_exp = ", input$p_exp, ")"),
+                          "Latus event-sampling model")
+
+    p <- make_repeat_animation(plot_data,
+                               title_prefix = model_title,
+                               repeat_len = repeat_len,
+                               highlight = highlight,
+                               max_life = max_life)
+
     anim_file <- tempfile(fileext = '.gif')
     anim_save(anim_file, animate(p, nframes = max_life, fps = 4))
-    
     isolate({ renderState$animationDone <- TRUE })
-    
-    # Return a list containing the filename
+
     list(src = anim_file,
          contentType = 'image/gif',
          width = 800,
          height = 600,
-         alt = "Animated plot")
+         alt = "Repeat expansion animation")
   }, deleteFile = TRUE)
 
-
-  ### Collect information about dead cells (>300 CAGs) ###
+  ### Collect information about dead cells  ### Collect information about dead cells (>300 CAGs) ###
   # Define function
   get_dead_cells_fun <- function(z){
     levels <- levels(as.factor(z$Year))
@@ -683,15 +843,14 @@ server <- function(input, output, session) {
 
   ### Collect information about healthy cells (<150 CAGs) ###
   # Define function
-  get_healthy_cells_fun <- function(z) {
+  get_healthy_cells_fun <- function(z, threshold = input$HealthyCellCAG_Threshold) {
     levels <- levels(as.factor(z$Year))
     barplot_data_pct_healthy_cells <- sapply(levels, function(x) {
       y <- as.numeric(x)
       year_subset <- z[z$Year == y,]
-      pcthealthy <- (sum(year_subset$RepeatLength <= input$HealthyCellCAG_Threshold, na.rm = TRUE) / length(year_subset$RepeatLength)) * 100
+      pcthealthy <- (sum(year_subset$RepeatLength <= threshold, na.rm = TRUE) / length(year_subset$RepeatLength)) * 100
       return(c(y, pcthealthy))
     } )
-    barplot_data_pct_healthy_cells <- barplot_data_pct_healthy_cells
     barplot_data_pct_healthy_cells <- t(as.data.frame(barplot_data_pct_healthy_cells))
     barplot_data_pct_healthy_cells <- as.data.frame(barplot_data_pct_healthy_cells)
     colnames(barplot_data_pct_healthy_cells) <- c("Age","pct_healthy_Cells")
@@ -701,75 +860,54 @@ server <- function(input, output, session) {
 
   ### Create histogram of healthy cells ###
   output$healthyCellsPlot <- renderPlot({
-    # Make plot_data dataframes generated in simulation dataframes availible ###
-    plot_data <- simulation_data()[[1]]
-    plot_data_untreated <- simulation_data()[[2]]
-    #barplot_data_pct_dead_cells_merged <- simulation_data()[[8]]
+    d <- active_simulation_data()
+    if (!is.null(d$barplot_data_pct_healthy_cells_merged)) {
+      barplot_data_pct_healthy_cells <- d$barplot_data_pct_healthy_cells_merged[, c("Age", "HealthyTreated")]
+      colnames(barplot_data_pct_healthy_cells) <- c("Age", "pct_healthy_Cells")
+    } else if (!is.null(d$healthy_cells)) {
+      barplot_data_pct_healthy_cells <- d$healthy_cells[, c("Age", "HealthyTreated")]
+      colnames(barplot_data_pct_healthy_cells) <- c("Age", "pct_healthy_Cells")
+    } else {
+      barplot_data_pct_healthy_cells <- get_healthy_cells_fun(d$plot_data, input$HealthyCellCAG_Threshold)
+    }
 
-    barplot_data_pct_healthy_cells <- get_healthy_cells_fun(plot_data)
-    barplot_data_pct_healthy_cells_untreated <- get_healthy_cells_fun(plot_data_untreated)
-    barplot_data_pct_healthy_cells_merged <- merge(barplot_data_pct_healthy_cells,barplot_data_pct_healthy_cells_untreated, by = "Age")
-    colnames(barplot_data_pct_healthy_cells_merged) <- c("Age","HealthyTreated","HealthyUntreated")
-    
     healthy_plot <- ggplot(barplot_data_pct_healthy_cells, aes(x = Age, y = pct_healthy_Cells)) +
       geom_bar(stat = "identity", fill = "steelblue") +
       theme_cowplot() +
       ylim(0, 100) +
-      labs(title = paste0("Percentage of Cells Under ", input$HealthyCellCAG_Threshold, " Repeats"), 
+      labs(title = paste0("Percentage of Cells Under ", input$HealthyCellCAG_Threshold, " Repeats"),
+           subtitle = ifelse(input$modelMode == "handsaker", "Handsaker CTMC model", "Latus event-sampling model"),
            x = "Age", y = paste0("% Cells Under ", input$HealthyCellCAG_Threshold, " Repeats"))
-    
 
-    
     isolate({ renderState$healthyDone <- TRUE })
-    
-    # Update progress bar
     updateProgressBar(session, id = "pbRun", value = 80, title = "Rendering output plots...")
-    
-    # Store the plot before returning it
     stored_plots$healthyPlot <- healthy_plot
-    
     return(healthy_plot)
   })
-  
+
   ### Create a line plot of from both treated and untreated datasets ###
   output$linePlot <- renderPlot({
+    d <- active_simulation_data()
     repeat_len <- isolate(input$germlineHDRepeatLength)
     intervention_age <- isolate(input$age_at_intervention)
     max_life <- isolate(input$maxLifetime)
-    
-    plot_data <- simulation_data()[[1]]
-    plot_data_untreated <- simulation_data()[[2]]
-    background_data <- simulation_data()[[3]]
-    background_data_treated <- simulation_data()[[4]]
-    stage1_df <- simulation_data()[[5]]
-    stage2_df <- simulation_data()[[6]]
-    stage3_df <- simulation_data()[[7]]
-    #barplot_data_pct_dead_cells_merged <- simulation_data()[[8]]
-    #barplot_data_pct_healthy_cells_merged <- simulation_data()[[9]]
-    therapeuticBenefitYears <- simulation_data()[[10]]
+    therapeuticBenefitYears <- ifelse(!is.null(d$therapeuticBenefitYears), d$therapeuticBenefitYears, NA)
 
-    # # Run Function on dead cells
-    barplot_data_pct_dead_cells <- get_dead_cells_fun(plot_data)
-    barplot_data_pct_dead_cells_untreated <- get_dead_cells_fun(plot_data_untreated)
-    barplot_data_pct_dead_cells_merged <- merge(barplot_data_pct_dead_cells,barplot_data_pct_dead_cells_untreated, by = "Age")
-    colnames(barplot_data_pct_dead_cells_merged) <- c("Age","DeadTreated","DeadUntreated")
-     
-    # Run Function on healthy cells
-    barplot_data_pct_healthy_cells <- get_healthy_cells_fun(plot_data)
-    barplot_data_pct_healthy_cells_untreated <- get_healthy_cells_fun(plot_data_untreated)
-    barplot_data_pct_healthy_cells_merged <- merge(barplot_data_pct_healthy_cells,barplot_data_pct_healthy_cells_untreated, by = "Age")
-    colnames(barplot_data_pct_healthy_cells_merged) <- c("Age","HealthyTreated","HealthyUntreated")
+    linePlot_data <- d$linePlot_data
+    if (is.null(linePlot_data)) {
+      hc <- get_healthy_cells_fun(d$plot_data, input$HealthyCellCAG_Threshold)
+      hcu <- get_healthy_cells_fun(d$plot_data_untreated, input$HealthyCellCAG_Threshold)
+      hcm <- merge(hc, hcu, by = "Age")
+      colnames(hcm) <- c("Age", "HealthyTreated", "HealthyUntreated")
+      dc <- get_dead_cells_fun(d$plot_data)
+      dcu <- get_dead_cells_fun(d$plot_data_untreated)
+      dcm <- merge(dc, dcu, by = "Age")
+      colnames(dcm) <- c("Age", "DeadTreated", "DeadUntreated")
+      linePlot_data <- merge(hcm, dcm, by = "Age")
+    }
 
-    # Create a line plot with two lines 
-    linePlot_data <- merge(barplot_data_pct_healthy_cells_merged, barplot_data_pct_dead_cells_merged, by = "Age")
-    
-    # Calculate predicted age of onset
     Predicted_AgeOfOnset <- GetPredAgeOfOnset(repeat_len)
 
-    # Update progress bar
-    updateProgressBar(session, id = "pbRun", value = 90, title = "Rendering output plots...")
-    
-    # Combine stages into a data frame with new colors
     convertToTreated_fun <- function(x){
       if (!is.finite(x) || x >= max_life) return(max_life)
       selected_line <- linePlot_data[linePlot_data$Age == x,]
@@ -780,61 +918,58 @@ server <- function(input, output, session) {
       age <- max(selected_line_2$Age) + 1
       return(age)
     }
-    
-    s1_start <- safe_min_age(stage1_df, max_life)
-    s2_start <- safe_min_age(stage2_df, max_life)
-    s3_start <- safe_min_age(stage3_df, max_life)
-    
-    background_data_treated <- data.frame(
-      xmin = as.numeric(c(-Inf, convertToTreated_fun(s1_start), convertToTreated_fun(s2_start), convertToTreated_fun(s3_start))),
-      xmax = as.numeric(c(convertToTreated_fun(s1_start), convertToTreated_fun(s2_start), convertToTreated_fun(s3_start), max_life)),
-      ymin = rep(-Inf, 4),
-      ymax = rep(Inf, 4),
-      fill = factor(c("white", "lightgrey", "grey", "darkgrey"), levels = c("white", "lightgrey", "grey", "darkgrey"))
-    )
-    
-    line_plot <- ggplot(linePlot_data, aes(x = Age)) +
-      geom_rect(data = background_data_treated, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill), alpha = 0.2, inherit.aes = FALSE) +
+
+    # Use existing stage shading if available; otherwise skip background rectangles
+    background_data_treated <- NULL
+    if (!is.null(d$stage1_df) && !is.null(d$stage2_df) && !is.null(d$stage3_df)) {
+      s1_start <- safe_min_age(d$stage1_df, max_life)
+      s2_start <- safe_min_age(d$stage2_df, max_life)
+      s3_start <- safe_min_age(d$stage3_df, max_life)
+      background_data_treated <- data.frame(
+        xmin = as.numeric(c(-Inf, convertToTreated_fun(s1_start), convertToTreated_fun(s2_start), convertToTreated_fun(s3_start))),
+        xmax = as.numeric(c(convertToTreated_fun(s1_start), convertToTreated_fun(s2_start), convertToTreated_fun(s3_start), max_life)),
+        ymin = rep(-Inf, 4),
+        ymax = rep(Inf, 4),
+        fill = factor(c("white", "lightgrey", "grey", "darkgrey"), levels = c("white", "lightgrey", "grey", "darkgrey"))
+      )
+    }
+
+    line_plot <- ggplot(linePlot_data, aes(x = Age))
+    if (!is.null(background_data_treated)) {
+      line_plot <- line_plot +
+        geom_rect(data = background_data_treated, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill),
+                  alpha = 0.2, inherit.aes = FALSE)
+    }
+    line_plot <- line_plot +
       geom_line(aes(y = HealthyTreated, color = "healthy_treated"), linewidth = 1.2) +
       geom_line(aes(y = HealthyUntreated, color = "healthy_untreated"), linewidth = 1.2) +
       geom_vline(xintercept = intervention_age, color = "purple", linetype = "dashed") +
-      annotate("text", x = intervention_age, y = 50, label = "Gene Therapy Administered", 
+      annotate("text", x = intervention_age, y = 50, label = "Gene Therapy Administered",
                vjust = -1, hjust = 1, color = "purple", angle = 90) +
       geom_vline(xintercept = convertToTreated_fun(Predicted_AgeOfOnset), color = "purple", linetype = "dashed") +
-      annotate("text", x = convertToTreated_fun(Predicted_AgeOfOnset), y = 50, label = "Motor Symptom Onset (CAP=100)", 
+      annotate("text", x = convertToTreated_fun(Predicted_AgeOfOnset), y = 50, label = "Motor Symptom Onset (CAP=100)",
                vjust = -1, hjust = 0.3, color = "purple", angle = 90) +
-      geom_vline(xintercept = convertToTreated_fun(Predicted_AgeOfOnset-14), color = "purple", linetype = "dashed") +
-      annotate("text", x = convertToTreated_fun(Predicted_AgeOfOnset-14), y = 50, label = "Typical Volumetric Change Detection", 
-               vjust = -1, hjust = 1, color = "purple", angle = 90) +
-      annotate("text", x=background_data_treated$xmin[2], y=-10, label=paste0(round(background_data_treated$xmin[2],1)), 
-               vjust=1.5, hjust=0.5, color="red", size=3) +
-      annotate("text", x=background_data_treated$xmin[3], y=-10, label=paste0(round(background_data_treated$xmin[3],1)), 
-               vjust=1.5, hjust=0.5, color="red", size=3) +
       scale_color_manual(
-        values = c("healthy_treated" = "purple", 
-                   "healthy_untreated" = "grey50"),
+        values = c("healthy_treated" = "purple", "healthy_untreated" = "grey50"),
         labels = c("healthy_treated" = paste0("Healthy Cells (<", input$HealthyCellCAG_Threshold, ") treated"),
                    "healthy_untreated" = paste0("Healthy Cells (<", input$HealthyCellCAG_Threshold, ") untreated"))
       ) +
-      scale_fill_manual(name="HD-ISS Stages", values=c("white"="white", "lightgrey"="lightpink", 
+      scale_fill_manual(name="HD-ISS Stages", values=c("white"="white", "lightgrey"="lightpink",
                                                        "grey"="violet", "darkgrey"="purple"),
                         labels=c("Stage 0", "Stage 1", "Stage 2", "Stage 3")) +
       labs(title="Percentage of Cells Over Time",
-           subtitle=paste0("Therapeutic Benefit (Years Delayed Onset) = ", therapeuticBenefitYears),
-           x="Age",
-           y="Percentage of cells",
-           color="Cell Type") +
+           subtitle=paste0(ifelse(input$modelMode == "handsaker", "Handsaker CTMC model", "Latus event-sampling model"),
+                           ifelse(is.na(therapeuticBenefitYears), "", paste0(" | Therapeutic Benefit = ", therapeuticBenefitYears, " years"))),
+           x="Age", y="Percentage of cells", color="Cell Type") +
       theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
             panel.background = element_blank(), axis.line = element_line(colour = "black"))
 
     isolate({ renderState$linePlotDone <- TRUE })
-    
-    # Store the line_plot before returning it
+    updateProgressBar(session, id = "pbRun", value = 90, title = "Rendering output plots...")
     stored_plots$linePlot <- line_plot
-    
     return(line_plot)
   })
-  
+
   # ============================================================================
   # Download Handlers
   # ============================================================================
@@ -843,53 +978,29 @@ server <- function(input, output, session) {
   output$download_animation_gif <- downloadHandler(
     filename = function() { paste0(get_file_prefix(), "_animation.gif") },
     content = function(file) {
-      plot_data <- simulation_data()$plot_data
+      d <- active_simulation_data()
+      plot_data <- d$plot_data
       repeat_len <- input$germlineHDRepeatLength
       highlight <- input$highlightTransducedCells
       max_life <- input$maxLifetime
-      
-      if (highlight != TRUE) {
-        p <- ggplot(plot_data, aes(x = RepeatLength, y = CellID)) +
-          geom_point(aes(color = RepeatLength), alpha = 0.7) +
-          geom_vline(xintercept = input$HealthyCellCAG_Threshold, color = "red", linetype = "dashed") +
-          scale_color_gradient2(low = "forestgreen", mid = "red", high = "red", midpoint = 200) +
-          labs(title = "Distribution of Repeat Lengths",
-               subtitle = "Year: {frame_time}",
-               x = "Repeat Length", y = "") +
-          theme_minimal() +
-          theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
-          coord_cartesian(xlim = c(0, 285)) +
-          transition_time(Year) + ease_aes('linear')
-      } else {
-        p <- ggplot(plot_data, aes(x = RepeatLength, y = CellID)) +
-          geom_point(aes(color = RepeatLength), alpha = 0.7) +
-          geom_point(data = subset(plot_data, Transduction == "transduced"),
-                     aes(x = RepeatLength, y = CellID),
-                     color = "violet", shape = 21, size = 3, fill = NA) +
-          geom_vline(xintercept = input$HealthyCellCAG_Threshold, color = "red", linetype = "dashed") +
-          scale_color_gradient2(low = "forestgreen", mid = "red", high = "red", midpoint = 200) +
-          labs(title = "Distribution of Repeat Lengths",
-               subtitle = "Year: {frame_time}",
-               x = "Repeat Length", y = "") +
-          theme_minimal() +
-          theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
-          coord_cartesian(xlim = c(0, 285)) +
-          transition_time(Year) + ease_aes('linear')
-      }
-      
+      model_title <- ifelse(input$modelMode == "handsaker",
+                            paste0("Handsaker CTMC model (p_exp = ", input$p_exp, ")"),
+                            "Latus event-sampling model")
+      p <- make_repeat_animation(plot_data, model_title, repeat_len, highlight, max_life)
       anim_save(file, animate(p, nframes = max_life, fps = 4))
     }
   )
-  
+
   # --- Animation underlying data (CSV) ---
   output$download_animation_csv <- downloadHandler(
     filename = function() { paste0(get_file_prefix(), "_cell_data.csv") },
     content = function(file) {
-      write.csv(simulation_data()$plot_data, file, row.names = FALSE)
+      write.csv(active_simulation_data()$plot_data, file, row.names = FALSE)
     }
   )
   
-  # --- Line Plot PNG ---
+  
+# --- Line Plot PNG ---
   output$download_linePlot_png <- downloadHandler(
     filename = function() { paste0(get_file_prefix(), "_linePlot.png") },
     content = function(file) {
@@ -901,7 +1012,7 @@ server <- function(input, output, session) {
   output$download_linePlot_csv <- downloadHandler(
     filename = function() { paste0(get_file_prefix(), "_linePlot_data.csv") },
     content = function(file) {
-      write.csv(simulation_data()$linePlot_data, file, row.names = FALSE)
+      write.csv(active_simulation_data()$linePlot_data, file, row.names = FALSE)
     }
   )
   
@@ -917,7 +1028,7 @@ server <- function(input, output, session) {
   output$download_healthyPlot_csv <- downloadHandler(
     filename = function() { paste0(get_file_prefix(), "_healthyCells_data.csv") },
     content = function(file) {
-      write.csv(simulation_data()$barplot_data_pct_healthy_cells_merged, file, row.names = FALSE)
+      write.csv(if (!is.null(active_simulation_data()$barplot_data_pct_healthy_cells_merged)) active_simulation_data()$barplot_data_pct_healthy_cells_merged else active_simulation_data()$healthy_cells, file, row.names = FALSE)
     }
   )
   
@@ -966,67 +1077,4 @@ server <- function(input, output, session) {
       write.csv(config, file, row.names = FALSE)
     }
   )
-  # #### Line plot showing shift in volumetric change ####
-  # output$line_plot_VolChangeShift <- renderPlot({
-  #   plot_data <- simulation_data()[[1]]
-  #   plot_data_untreated <- simulation_data()[[2]]
-  #   background_data <- simulation_data()[[3]]
-  #   background_data_treated <- simulation_data()[[4]]
-  #   
-  #   # Run Function on dead cells
-  #   barplot_data_pct_dead_cells <- get_dead_cells_fun(plot_data)
-  #   barplot_data_pct_dead_cells_untreated <- get_dead_cells_fun(plot_data_untreated)
-  #   barplot_data_pct_dead_cells_merged <- merge(barplot_data_pct_dead_cells,barplot_data_pct_dead_cells_untreated, by = "Age")
-  #   colnames(barplot_data_pct_dead_cells_merged) <- c("Age","DeadTreated","DeadUntreated")
-  #   
-  #   # Run Function on healthy cells
-  #   barplot_data_pct_healthy_cells <- get_healthy_cells_fun(plot_data)
-  #   barplot_data_pct_healthy_cells_untreated <- get_healthy_cells_fun(plot_data_untreated)
-  #   barplot_data_pct_healthy_cells_merged <- merge(barplot_data_pct_healthy_cells,barplot_data_pct_healthy_cells_untreated, by = "Age")
-  #   colnames(barplot_data_pct_healthy_cells_merged) <- c("Age","HealthyTreated","HealthyUntreated")
-  #   
-  #   # Create a line plot with two lines 
-  #   linePlot_data <- merge(barplot_data_pct_healthy_cells_merged, barplot_data_pct_dead_cells_merged, by = "Age")
-  #   
-  #   # Calculate predicted age of onset
-  #   Predicted_AgeOfOnset <- GetPredAgeOfOnset(input$germlineHDRepeatLength)
-  #   
-  #   line_plot_VolChangeShift <- ggplot(linePlot_data, aes(x = Age)) +
-  #     #geom_rect(data = background_data_treated, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill), alpha = 0.2, inherit.aes = FALSE) +
-  #     geom_line(aes(y = HealthyTreated, color = "Healthy Cells (<150) treated")) +
-  #     geom_line(aes(y = HealthyUntreated, color = "Healthy Cells (<150) untreated")) +
-  #     #geom_line(aes(y = DeadTreated, color = "Dead Cells (>300) treated")) +
-  #     #geom_line(aes(y = DeadUntreated, color = "Dead Cells (>300) untreated")) +
-  #     geom_vline(xintercept = age_at_intervention, color = "purple", linetype = "dashed") +
-  #     annotate("text", x = age_at_intervention, y = 50, label = "Gene Therapy Administered", 
-  #              vjust = -1, hjust = 1, color = "purple", angle = 90) +
-  #     #geom_vline(xintercept = convertToTreated_fun(Predicted_AgeOfOnset), color = "purple", linetype = "dashed") +
-  #     #annotate("text", x = convertToTreated_fun(Predicted_AgeOfOnset), y = 50, label = "Motor Symptom Onset (CAP=100)", 
-  #     #         vjust = -1, hjust = -0.1, color = "purple", angle = 90) +
-  #     geom_vline(xintercept = Predicted_AgeOfOnset - 14, color = "grey", linetype = "dashed") +
-  #     annotate("text", x = Predicted_AgeOfOnset - 14, y = 50, label = "Typical Volumetric Change Detection Untreated", 
-  #              vjust = -1, hjust = 1, color = "grey", angle = 90) +
-  #     geom_vline(xintercept = convertToTreated_fun(Predicted_AgeOfOnset-14), color = "purple", linetype = "dashed") +
-  #     annotate("text", x = convertToTreated_fun(Predicted_AgeOfOnset-14), y = 50, label = "Typical Volumetric Change Detection Treated", 
-  #              vjust = -1, hjust = 1, color = "purple", angle = 90) +
-  #     scale_color_manual(values = c("Healthy Cells (<150) treated" = "purple", 
-  #                                   "Healthy Cells (<150) untreated" = "grey",
-  #                                   "Dead Cells (>300) treated" = "violet", 
-  #                                   "Dead Cells (>300) untreated" = "lightgrey")) +
-  #     #scale_fill_manual(name="HD-ISS Stages", values=c("white"="white", "lightgrey"="lightpink", 
-  #     #                                                 "grey"="violet", "darkgrey"="purple"),
-  #     #                  labels=c("Stage 0", 
-  #     #                           "Stage 1",
-  #     #                           "Stage 2",
-  #     #                           "Stage 3")) +
-  #     labs(title="Percentage of Cells Over Time",
-  #          subtitle=paste0("Delay in onset of volumetric changes = ", as.numeric(convertToTreated_fun(Predicted_AgeOfOnset-14) - (Predicted_AgeOfOnset - 14)), " years"),
-  #          x="Age",
-  #          y="Percentage of cells",
-  #          color="Cell Type") +
-  #     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-  #           panel.background = element_blank(), axis.line = element_line(colour = "black"))
-  #   
-  #   return(line_plot_VolChangeShift)
-  # })
 }

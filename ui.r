@@ -1,6 +1,6 @@
 required_packages <- c("shiny", "ggplot2", "cowplot", "viridis",
                        "R6", "reshape2", "gifski", "av",
-                       "RCurl", "httr", "remotes", "shinyWidgets","gganimate")
+                       "RCurl", "httr", "remotes", "shinyWidgets", "gganimate", "expm")
 
 # Install any missing packages
 installed <- rownames(installed.packages())
@@ -24,6 +24,7 @@ library(RCurl)
 library(httr)
 library(gganimate)
 library(shinyWidgets)
+library(expm)
 
 # Disable SSL verification (for servers with bad CA config)
 set_config(config(ssl_verifypeer = 0L))
@@ -120,11 +121,27 @@ ui <- fluidPage(
       
       br(),
       
-      sliderInput("n_contractions", "Contraction events per cycle (-1 CAG):", 
-                  value = 1, min = 0, max = 10, step = 1),
-      sliderInput("n_expansions", "Expansion events per cycle (+1 CAG):", 
-                  value = 6, min = 1, max = 10, step = 1),
-      helpText("Controls the expansion-to-contraction bias. Default 6:1 means each mutation event has a 6/7 chance of adding +1 CAG and a 1/7 chance of -1 CAG."),
+      radioButtons("modelMode", "Simulation method:",
+                   choices = c("Expansion to contraction event ratio method" = "latus",
+                               "Handsaker CTMC model (Recommended)" = "handsaker"),
+                   selected = "handsaker"),
+      helpText("Choose which simulation engine to run. The app will output figures and data from the selected method only."),
+      
+      conditionalPanel(
+        condition = "input.modelMode == 'latus'",
+        sliderInput("n_contractions", "Contraction events per cycle (-1 CAG):", 
+                    value = 1, min = 0, max = 10, step = 1),
+        sliderInput("n_expansions", "Expansion events per cycle (+1 CAG):", 
+                    value = 6, min = 1, max = 10, step = 1),
+        helpText("Controls the expansion-to-contraction bias for the Latus event-sampling model. Default 6:1 means each mutation event has a 6/7 chance of adding +1 CAG and a 1/7 chance of -1 CAG.")
+      ),
+      
+      conditionalPanel(
+        condition = "input.modelMode == 'handsaker'",
+        sliderInput("p_exp", "Handsaker expansion probability (p_exp):",
+                    value = 0.676, min = 0.501, max = 1.00, step = 0.001),
+        helpText("Used only for the Handsaker CTMC model. Supplementary Fig. SN4.4 reports p_exp = 0.676 ± 0.011 (~2.1:1 expansion:contraction). T1=33.5 and T2=72.2 are fixed to Handsaker two-phase linear parameter estimates.")
+      ),
       
       br(),
       
@@ -142,16 +159,11 @@ ui <- fluidPage(
     ),
     
     mainPanel(
-      #plotOutput("animationPlot"),
       imageOutput("animationPlot", height = "600px"),
       fluidRow(
         column(3, downloadButton("download_animation_gif", "Download GIF")),
         column(3, downloadButton("download_animation_csv", "Download Data (CSV)"))
       ),
-      br(),
-      br(),
-      br(),
-      br(),
       br(),
       br(),
       plotOutput("linePlot"),

@@ -114,7 +114,7 @@ Default p_exp = 0.676 ± 0.011 (~2.1:1 expansion:contraction ratio), from Handsa
 
 ### Therapeutic intervention
 
-At the specified intervention age, a fraction of neurons (transduction rate) receive the therapeutic modification. In treated neurons, the mutation rate is reduced by the MSH3 knockdown percentage, producing a modified rate matrix Q_treated with lower expansion rates. Treated and untreated neurons are then simulated independently for the remainder of the lifetime.
+At the specified intervention age, a fraction of neurons (transduction rate) receive the therapeutic modification. In treated neurons, the mutation rate is reduced by the somatic instability reduction percentage, producing a modified rate matrix Q_treated with lower expansion rates. Treated and untreated neurons are then simulated independently for the remainder of the lifetime.
 
 ## Citation
 

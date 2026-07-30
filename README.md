@@ -6,7 +6,7 @@ An interactive web application for simulating somatic CAG repeat expansion in Hu
 
 **Live app:** [www.LatusHDmodel.com](https://www.latushdmodel.com)
 
-Note: it may take up to a minute to launch the web app if you are accessing it for the first time in a 24 hour period.
+Note: It may take up to a minute to launch the web app if you are accessing it for the first time in a 24 hour period.
 
 ## Overview
 

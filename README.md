@@ -4,7 +4,7 @@
 
 An interactive web application for simulating somatic CAG repeat expansion in Huntington's disease and modeling the potential therapeutic impact of interventions targeting somatic instability.
 
-**Live app:** [https://latusbio.shinyapps.io/HD_Model/](https://latusbio.shinyapps.io/HD_Model/)
+**Live app:** [www.LatusHDmodel.com](www.latushdmodel.com)
 
 ## Overview
 

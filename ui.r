@@ -76,9 +76,15 @@ ui <- fluidPage(
                  "Outputs include an animated visualization of repeat expansion, treated vs. untreated cell health trajectories, ",
                  "and HD-ISS stage progression. All plots and underlying data are downloadable."
                ),
+               p(style = "font-size: 25px; line-height: 1.6; color: #333:",
+                 "Use:"),
+               p(style = "font-size: 14px; line-height: 1.6; color: #555;",
+                 "This tool is intended for use by the scientific research community. Calculations are based on population averages from limited publicly available datasets.", tags$b(" Outputs do not reflect or predict any individual's specific disease trajectory and should not be used for prognostic purposes or decision making by patients or healthcare providers.")
+               ),
                p(style = "font-size: 10px; line-height: 1.0; color: #333:",
                  "This web app was developed and is maintained by Latus Bio. Address correspondance to paul.ranum@latusbio.com. Code is available on", tags$a(href = "https://github.com/LatusBio/HD_Model_NatComm_Publication/", "Github", target = "_blank"),". "
                ),
+               
            )
     )
   ),

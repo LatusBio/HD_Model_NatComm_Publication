@@ -8,6 +8,10 @@ An interactive web application for simulating somatic CAG repeat expansion in Hu
 
 Note: It may take up to a minute to launch the web app if you are accessing it for the first time in a 24 hour period.
 
+## Use
+
+This tool is intended for use by the scientific research community. Calculations are based on population averages from limited publicly available datasets. Outputs do not reflect or predict any individual's specific disease trajectory and should not be used for prognostic purposes or decision making by patients or healthcare providers.
+
 ## Overview
 
 Huntington's disease (HD) is caused by an expanded CAG trinucleotide repeat in the *HTT* gene. While the inherited (germline) repeat length determines disease risk, **somatic expansion** of the CAG repeat in striatal medium spiny neurons (MSNs) over a patient's lifetime is increasingly recognized as a key driver of disease onset and progression. This application allows users to simulate this process and explore how therapeutic interventions that reduce somatic expansion rate could delay neuronal dysfunction and HD milestones.
@@ -142,4 +146,4 @@ Correspondence: paul.ranum@latusbio.com
 
 ## License
 
-[Specify your license here]
+This tool is provided for free to the scientific research community. Reproduction and reuse of this tool by non-profit and academic institutions is welcomed with attribution (please cite Latus Bio and Simpson and Ranum et al 2026, Nature Communications).  Use of this tool by for-profit institutions is restricted without the express permission of Latus Bio. Contact paul.ranum@latusbio.com with licensing inquiries.

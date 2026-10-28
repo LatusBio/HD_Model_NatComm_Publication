@@ -125,8 +125,8 @@ At the specified intervention age, a fraction of neurons (transduction rate) rec
 If you use this tool in your research, please cite:
 
 ```
-Simpson et al. (2026). [Title]. bioRxiv.
-https://doi.org/10.64898/2026.01.06.697909
+Simpson et al. (2026). Computational modeling and preclinical evaluation support targeting somatic instability for Huntington’s disease treatment. Nat Comm.
+https://doi.org/10.1038/s41467-026-78769-2
 ```
 
 And the foundational expansion rate model:
